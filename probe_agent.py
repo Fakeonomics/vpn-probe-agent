@@ -261,6 +261,7 @@ def run(values, once=False, interval=60, use_engine=True):
                     "validation_result": "valid",
                     "observation_result": observation_result(ok, stage),
                     "failure_stage": None if ok else stage,
+                    "test_engine_version": "sing-box-1.12.4",
                     "network": {
                         "country": values.get("PROBE_COUNTRY", ""),
                         "region": values.get("PROBE_REGION", ""),
