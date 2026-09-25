@@ -23,6 +23,7 @@ def _tls(query, host):
             "public_key": query.get("pbk", [""])[0],
             "short_id": query.get("sid", [""])[0],
         }
+        tls["utls"] = {"enabled": True, "fingerprint": query.get("fp", ["chrome"])[0]}
     return tls
 
 
@@ -96,7 +97,10 @@ def _outbound(config):
         item["tag"] = "proxy"
         return item
     if item["type"] == "vless":
-        item["security"] = "none"
+        item.pop("password", None)
+        item.pop("security", None)
+    if item["type"] == "trojan":
+        item.pop("uuid", None)
     item["tag"] = "proxy"
     return item
 
