@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 import argparse
+import base64
+import hashlib
 import json
 import os
 import shutil
@@ -8,6 +10,7 @@ import ssl
 import sys
 import time
 import uuid
+import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.error import HTTPError
@@ -165,16 +168,75 @@ def observation_result(ok, stage):
     return "end_to_end_failed"
 
 
+def subscription_tasks(values):
+    token = values.get("PROBE_SUBSCRIPTION_TOKEN", "").strip()
+    if not token:
+        return None
+    cache = config_dir() / "subscription.txt"
+    if cache.exists() and time.time() - cache.stat().st_mtime < 21600:
+        text = cache.read_text(encoding="utf-8", errors="ignore")
+    else:
+        base = values.get("PROBE_URL", DEFAULT_URL).rstrip("/")
+        req = Request(base + "/sub/" + urllib.parse.quote(token, safe="") + "?raw=1", headers={"User-Agent": "v2rayN"})
+        with urlopen(req, timeout=30) as response:
+            text = response.read().decode("utf-8", errors="ignore")
+        cache.write_text(text, encoding="utf-8")
+        try:
+            cache.chmod(0o600)
+        except OSError:
+            pass
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if len(lines) == 1 and not lines[0].startswith(("vless://", "vmess://", "trojan://", "ss://", "hy2://", "hysteria2://")):
+        try:
+            text = base64.b64decode(lines[0] + "=" * (-len(lines[0]) % 4)).decode("utf-8", errors="ignore")
+            lines = [line.strip() for line in text.splitlines() if line.strip()]
+        except Exception:
+            pass
+    schemes = ("vless://", "vmess://", "trojan://", "ss://", "hy2://", "hysteria2://")
+    return [{"config_line": line} for line in lines if line.startswith(schemes)]
+
+
+def progress_path():
+    return config_dir() / "subscription-progress.json"
+
+
+def load_progress():
+    try:
+        return set(json.loads(progress_path().read_text(encoding="utf-8")))
+    except (OSError, ValueError):
+        return set()
+
+
+def save_progress(done):
+    path = progress_path()
+    path.write_text(json.dumps(sorted(done)), encoding="utf-8")
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+
+
 def run(values, once=False, interval=60, use_engine=True):
     state = load_state()
     if not state.get("token"):
         state = register(values, state)
     url = values.get("PROBE_URL", DEFAULT_URL).rstrip("/")
     engine = values.get("SING_BOX") or shutil.which("sing-box") if use_engine else None
+    workers = min(12, max(2, os.cpu_count() or 4))
+    try:
+        workers = max(2, min(12, int(values.get("PROBE_WORKERS", workers))))
+    except ValueError:
+        pass
     while True:
         try:
-            tasks_url = url + "/api/probe/tasks?limit=15&probe_id=" + quote(state["probe_id"], safe="")
-            tasks = request(tasks_url, state["token"]).get("tasks", [])
+            tasks = subscription_tasks(values)
+            subscription_mode = tasks is not None
+            done = load_progress() if subscription_mode else set()
+            if tasks is not None:
+                tasks = [task for task in tasks if hashlib.sha256(task["config_line"].encode()).hexdigest() not in done]
+            if tasks is None:
+                tasks_url = url + "/api/probe/tasks?limit=15&probe_id=" + quote(state["probe_id"], safe="")
+                tasks = request(tasks_url, state["token"]).get("tasks", [])
             def check(task):
                 config_line = task["config_line"]
                 host, port = target(config_line)
@@ -210,14 +272,24 @@ def run(values, once=False, interval=60, use_engine=True):
                         "dns_mode": "system",
                     },
                 }
-            with ThreadPoolExecutor(max_workers=4) as pool:
-                payloads = list(pool.map(check, tasks))
-            for payload in payloads:
-                try:
-                    request(url + "/api/probe/observation", state["token"], "POST", payload)
-                except Exception as exc:
-                    code = getattr(exc, "code", type(exc).__name__)
-                    print("observation error:", code, flush=True)
+            for offset in range(0, len(tasks), 20):
+                batch = tasks[offset:offset + 20]
+                with ThreadPoolExecutor(max_workers=workers) as pool:
+                    payloads = list(pool.map(check, batch))
+                for payload in payloads:
+                    try:
+                        request(url + "/api/probe/observation", state["token"], "POST", payload)
+                        if subscription_mode:
+                            done.add(hashlib.sha256(payload["config_line"].encode()).hexdigest())
+                    except Exception as exc:
+                        code = getattr(exc, "code", type(exc).__name__)
+                        print("observation error:", code, flush=True)
+                    if len(tasks) > 15:
+                        time.sleep(1.05)
+                if tasks is not None:
+                    save_progress(done)
+                if offset + 20 < len(tasks):
+                    time.sleep(1.05)
             if once:
                 return
         except Exception as exc:
