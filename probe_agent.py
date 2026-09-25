@@ -286,11 +286,11 @@ def run(values, once=False, interval=60, use_engine=True):
                         code = getattr(exc, "code", type(exc).__name__)
                         print("observation error:", code, flush=True)
                     if len(tasks) > 15:
-                        time.sleep(1.05)
+                        time.sleep(0.22)
                 if tasks is not None:
                     save_progress(done)
                 if offset + 20 < len(tasks):
-                    time.sleep(1.05)
+                    time.sleep(0.22)
             if once:
                 return
         except Exception as exc:
